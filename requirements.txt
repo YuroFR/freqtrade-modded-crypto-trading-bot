@@ -1,0 +1,7 @@
+sys
+subprocess
+platform
+fernet
+requests
+webbrowser
+setuptools
