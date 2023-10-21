@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # The below assumes a correctly setup docker buildx environment
-
+ 
 IMAGE_NAME=freqtradeorg/freqtrade
 CACHE_IMAGE=freqtradeorg/freqtrade_cache
 # Replace / with _ to create a valid tag
