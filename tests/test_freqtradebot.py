@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import List
 from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
+
 import pytest
 from pandas import DataFrame
 from sqlalchemy import select
