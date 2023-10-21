@@ -1,5 +1,6 @@
 FROM python:3.9.16-slim-bullseye as base
 
+
 # Setup env
 ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
