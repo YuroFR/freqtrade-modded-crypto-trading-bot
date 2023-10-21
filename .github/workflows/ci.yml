@@ -1,0 +1,546 @@
+name: Freqtrade CI
+
+on:
+  push:
+    branches:
+      - stable
+      - develop
+      - ci/*
+    tags:
+  release:
+    types: [published]
+  pull_request:
+  schedule:
+    - cron:  '0 5 * * 4'
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}"
+  cancel-in-progress: true
+permissions:
+  repository-projects: read
+jobs:
+  build_linux:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04, ubuntu-22.04 ]
+        python-version: ["3.9", "3.10", "3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache_dependencies
+      uses: actions/cache@v3
+      id: cache
+      with:
+        path: ~/dependencies/
+        key: ${{ runner.os }}-dependencies
+
+    - name: pip cache (linux)
+      uses: actions/cache@v3
+      if: runner.os == 'Linux'
+      with:
+        path: ~/.cache/pip
+        key: test-${{ matrix.os }}-${{ matrix.python-version }}-pip
+
+    - name: TA binary *nix
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cd build_helpers && ./install_ta-lib.sh ${HOME}/dependencies/; cd ..
+
+    - name: Installation - *nix
+      if: runner.os == 'Linux'
+      run: |
+        python -m pip install --upgrade pip wheel
+        export LD_LIBRARY_PATH=${HOME}/dependencies/lib:$LD_LIBRARY_PATH
+        export TA_LIBRARY_PATH=${HOME}/dependencies/lib
+        export TA_INCLUDE_PATH=${HOME}/dependencies/include
+        pip install -r requirements-dev.txt
+        pip install -e .
+
+    - name: Tests
+      run: |
+        pytest --random-order --cov=freqtrade --cov-config=.coveragerc
+
+    - name: Coveralls
+      if: (runner.os == 'Linux' && matrix.python-version == '3.10' && matrix.os == 'ubuntu-22.04')
+      env:
+        # Coveralls token. Not used as secret due to github not providing secrets to forked repositories
+        COVERALLS_REPO_TOKEN: 6D1m0xupS3FgutfuGao8keFf9Hc0FpIXu
+      run: |
+        # Allow failure for coveralls
+        coveralls || true
+
+    - name: Check for repository changes
+      run: |
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "Repository is dirty, changes detected:"
+          git status
+          git diff
+          exit 1
+        else
+          echo "Repository is clean, no changes detected."
+        fi
+
+    - name: Backtesting (multi)
+      run: |
+        cp config_examples/config_bittrex.example.json config.json
+        freqtrade create-userdir --userdir user_data
+        freqtrade new-strategy -s AwesomeStrategy
+        freqtrade new-strategy -s AwesomeStrategyMin --template minimal
+        freqtrade backtesting --datadir tests/testdata --strategy-list AwesomeStrategy AwesomeStrategyMin -i 5m
+
+    - name: Hyperopt
+      run: |
+        cp config_examples/config_bittrex.example.json config.json
+        freqtrade create-userdir --userdir user_data
+        freqtrade hyperopt --datadir tests/testdata -e 6 --strategy SampleStrategy --hyperopt-loss SharpeHyperOptLossDaily --print-all
+
+    - name: Sort imports (isort)
+      run: |
+        isort --check .
+
+    - name: Run Ruff
+      run: |
+        ruff check --format=github .
+
+    - name: Mypy
+      run: |
+        mypy freqtrade scripts tests
+
+    - name: Discord notification
+      uses: rjstone/discord-webhook-notify@v1
+      if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+      with:
+          severity: error
+          details: Freqtrade CI failed on ${{ matrix.os }}
+          webhookUrl: ${{ secrets.DISCORD_WEBHOOK }}
+
+  build_macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ macos-latest ]
+        python-version: ["3.9", "3.10", "3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        check-latest: true
+
+    - name: Cache_dependencies
+      uses: actions/cache@v3
+      id: cache
+      with:
+        path: ~/dependencies/
+        key: ${{ runner.os }}-dependencies
+
+    - name: pip cache (macOS)
+      uses: actions/cache@v3
+      if: runner.os == 'macOS'
+      with:
+        path: ~/Library/Caches/pip
+        key: test-${{ matrix.os }}-${{ matrix.python-version }}-pip
+
+    - name: TA binary *nix
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cd build_helpers && ./install_ta-lib.sh ${HOME}/dependencies/; cd ..
+
+    - name: Installation - macOS
+      if: runner.os == 'macOS'
+      run: |
+        # brew update
+        # TODO: Should be the brew upgrade
+        # homebrew fails to update python due to unlinking failures
+        # https://github.com/actions/runner-images/issues/6817
+        rm /usr/local/bin/2to3 || true
+        rm /usr/local/bin/2to3-3.11 || true
+        rm /usr/local/bin/idle3 || true
+        rm /usr/local/bin/idle3.11 || true
+        rm /usr/local/bin/pydoc3 || true
+        rm /usr/local/bin/pydoc3.11 || true
+        rm /usr/local/bin/python3 || true
+        rm /usr/local/bin/python3.11 || true
+        rm /usr/local/bin/python3-config || true
+        rm /usr/local/bin/python3.11-config || true
+
+        brew install hdf5 c-blosc
+        python -m pip install --upgrade pip wheel
+        export LD_LIBRARY_PATH=${HOME}/dependencies/lib:$LD_LIBRARY_PATH
+        export TA_LIBRARY_PATH=${HOME}/dependencies/lib
+        export TA_INCLUDE_PATH=${HOME}/dependencies/include
+        pip install -r requirements-dev.txt
+        pip install -e .
+
+    - name: Tests
+      run: |
+        pytest --random-order
+
+    - name: Check for repository changes
+      run: |
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "Repository is dirty, changes detected:"
+          git status
+          git diff
+          exit 1
+        else
+          echo "Repository is clean, no changes detected."
+        fi
+
+    - name: Backtesting
+      run: |
+        cp config_examples/config_bittrex.example.json config.json
+        freqtrade create-userdir --userdir user_data
+        freqtrade new-strategy -s AwesomeStrategyAdv --template advanced
+        freqtrade backtesting --datadir tests/testdata --strategy AwesomeStrategyAdv
+
+    - name: Hyperopt
+      run: |
+        cp config_examples/config_bittrex.example.json config.json
+        freqtrade create-userdir --userdir user_data
+        freqtrade hyperopt --datadir tests/testdata -e 5 --strategy SampleStrategy --hyperopt-loss SharpeHyperOptLossDaily --print-all
+
+    - name: Sort imports (isort)
+      run: |
+        isort --check .
+
+    - name: Run Ruff
+      run: |
+        ruff check --format=github .
+
+    - name: Mypy
+      run: |
+        mypy freqtrade scripts
+
+    - name: Discord notification
+      uses: rjstone/discord-webhook-notify@v1
+      if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+      with:
+          severity: info
+          details: Test Succeeded!
+          webhookUrl: ${{ secrets.DISCORD_WEBHOOK }}
+
+  build_windows:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows-latest ]
+        python-version: ["3.9", "3.10", "3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Pip cache (Windows)
+      uses: actions/cache@v3
+      with:
+        path: ~\AppData\Local\pip\Cache
+        key: ${{ matrix.os }}-${{ matrix.python-version }}-pip
+
+    - name: Installation
+      run: |
+        ./build_helpers/install_windows.ps1
+
+    - name: Tests
+      run: |
+        pytest --random-order
+
+    - name: Check for repository changes
+      run: |
+        if (git status --porcelain) {
+          Write-Host "Repository is dirty, changes detected:"
+          git status
+          git diff
+          exit 1
+        }
+        else {
+          Write-Host "Repository is clean, no changes detected."
+        }
+
+    - name: Backtesting
+      run: |
+        cp config_examples/config_bittrex.example.json config.json
+        freqtrade create-userdir --userdir user_data
+        freqtrade backtesting --datadir tests/testdata --strategy SampleStrategy
+
+    - name: Hyperopt
+      run: |
+        cp config_examples/config_bittrex.example.json config.json
+        freqtrade create-userdir --userdir user_data
+        freqtrade hyperopt --datadir tests/testdata -e 5 --strategy SampleStrategy --hyperopt-loss SharpeHyperOptLossDaily --print-all
+
+    - name: Run Ruff
+      run: |
+        ruff check --format=github .
+
+    - name: Mypy
+      run: |
+        mypy freqtrade scripts tests
+
+    - name: Discord notification
+      uses: rjstone/discord-webhook-notify@v1
+      if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+      with:
+          severity: error
+          details: Test Failed
+          webhookUrl: ${{ secrets.DISCORD_WEBHOOK }}
+
+  mypy_version_check:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+
+    - name: pre-commit dependencies
+      run: |
+        pip install pyaml
+        python build_helpers/pre_commit_update.py
+
+  pre-commit:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - uses: pre-commit/action@v3.0.0
+
+  docs_check:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Documentation syntax
+      run: |
+        ./tests/test_docs.sh
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Documentation build
+      run: |
+        pip install -r docs/requirements-docs.txt
+        pip install mkdocs
+        mkdocs build
+
+    - name: Discord notification
+      uses: rjstone/discord-webhook-notify@v1
+      if: failure() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+      with:
+          severity: error
+          details: Freqtrade doc test failed!
+          webhookUrl: ${{ secrets.DISCORD_WEBHOOK }}
+
+
+  build_linux_online:
+    # Run pytest with "live" checks
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.9"
+
+    - name: Cache_dependencies
+      uses: actions/cache@v3
+      id: cache
+      with:
+        path: ~/dependencies/
+        key: ${{ runner.os }}-dependencies
+
+    - name: pip cache (linux)
+      uses: actions/cache@v3
+      if: runner.os == 'Linux'
+      with:
+        path: ~/.cache/pip
+        key: test-${{ matrix.os }}-${{ matrix.python-version }}-pip
+
+    - name: TA binary *nix
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cd build_helpers && ./install_ta-lib.sh ${HOME}/dependencies/; cd ..
+
+    - name: Installation - *nix
+      if: runner.os == 'Linux'
+      run: |
+        python -m pip install --upgrade pip wheel
+        export LD_LIBRARY_PATH=${HOME}/dependencies/lib:$LD_LIBRARY_PATH
+        export TA_LIBRARY_PATH=${HOME}/dependencies/lib
+        export TA_INCLUDE_PATH=${HOME}/dependencies/include
+        pip install -r requirements-dev.txt
+        pip install -e .
+
+    - name: Tests incl. ccxt compatibility tests
+      env:
+        CI_WEB_PROXY: http://152.67.78.211:13128
+      run: |
+        pytest --random-order --cov=freqtrade --cov-config=.coveragerc --longrun
+
+
+  # Notify only once - when CI completes (and after deploy) in case it's successfull
+  notify-complete:
+    needs: [
+      build_linux,
+      build_macos,
+      build_windows,
+      docs_check,
+      mypy_version_check,
+      pre-commit,
+      build_linux_online
+    ]
+    runs-on: ubuntu-22.04
+    # Discord notification can't handle schedule events
+    if: (github.event_name != 'schedule')
+    permissions:
+      repository-projects: read
+    steps:
+
+    - name: Check user permission
+      id: check
+      uses: scherermichael-oss/action-has-permission@1.0.6
+      with:
+        required-permission: write
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Discord notification
+      uses: rjstone/discord-webhook-notify@v1
+      if: always() && steps.check.outputs.has-permission && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+      with:
+          severity: info
+          details: Test Completed!
+          webhookUrl: ${{ secrets.DISCORD_WEBHOOK }}
+
+  deploy:
+    needs: [ build_linux, build_macos, build_windows, docs_check, mypy_version_check, pre-commit ]
+    runs-on: ubuntu-22.04
+
+    if: (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'release') && github.repository == 'freqtrade/freqtrade'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Extract branch name
+      shell: bash
+      run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF##*/})"
+      id: extract_branch
+
+    - name: Build distribution
+      run: |
+        pip install -U setuptools wheel
+        python setup.py sdist bdist_wheel
+
+    - name: Publish to PyPI (Test)
+      uses: pypa/gh-action-pypi-publish@v1.8.10
+      if: (github.event_name == 'release')
+      with:
+        user: __token__
+        password: ${{ secrets.pypi_test_password }}
+        repository_url: https://test.pypi.org/legacy/
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@v1.8.10
+      if: (github.event_name == 'release')
+      with:
+        user: __token__
+        password: ${{ secrets.pypi_password }}
+
+    - name: Dockerhub login
+      env:
+        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      run: |
+        echo "${DOCKER_PASSWORD}" | docker login --username ${DOCKER_USERNAME} --password-stdin
+
+    # We need docker experimental to pull the ARM image.
+    - name: Switch docker to experimental
+      run: |
+          docker version -f '{{.Server.Experimental}}'
+          echo $'{\n    "experimental": true\n}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          docker version -f '{{.Server.Experimental}}'
+
+    - name: Set up Docker Buildx
+      id: buildx
+      uses: crazy-max/ghaction-docker-buildx@v3.3.1
+      with:
+        buildx-version: latest
+        qemu-version: latest
+
+    - name: Available platforms
+      run: echo ${{ steps.buildx.outputs.platforms }}
+
+    - name: Build and test and push docker images
+      env:
+        BRANCH_NAME: ${{ steps.extract_branch.outputs.branch }}
+      run: |
+        build_helpers/publish_docker_multi.sh
+
+  deploy_arm:
+    permissions:
+      packages: write
+    needs: [ deploy ]
+    # Only run on 64bit machines
+    runs-on: [self-hosted, linux, ARM64]
+    if: (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'release') && github.repository == 'freqtrade/freqtrade'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Extract branch name
+      shell: bash
+      run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF##*/})"
+      id: extract_branch
+
+    - name: Dockerhub login
+      env:
+        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      run: |
+        echo "${DOCKER_PASSWORD}" | docker login --username ${DOCKER_USERNAME} --password-stdin
+
+    - name: Build and test and push docker images
+      env:
+        BRANCH_NAME: ${{ steps.extract_branch.outputs.branch }}
+        GHCR_USERNAME: ${{ github.actor }}
+        GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        build_helpers/publish_docker_arm64.sh
+
+    - name: Discord notification
+      uses: rjstone/discord-webhook-notify@v1
+      if: always() && ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) && (github.event_name != 'schedule')
+      with:
+          severity: info
+          details: Deploy Succeeded!
+          webhookUrl: ${{ secrets.DISCORD_WEBHOOK }}
